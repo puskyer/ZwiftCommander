@@ -49,6 +49,7 @@
 #include "softdevice_handler_appsh.h"
 #include "app_timer_appsh.h"
 #include "peer_manager.h"
+#include "nrf_drv_adc.h"
 #include "app_button.h"
 #include "fds.h"
 #include "fstorage.h"
@@ -75,8 +76,8 @@
 #define KEY_PRESS_BUTTON_ID              0                                          /**< Button used as Keyboard key press. */
 #define SHIFT_BUTTON_ID                  1                                          /**< Button used as 'SHIFT' Key. */
 
-#define DEVICE_NAME                      "Nordic_Keyboard"                          /**< Name of device. Will be included in the advertising data. */
-#define MANUFACTURER_NAME                "NordicSemiconductor"                      /**< Manufacturer. Will be passed to Device Information Service. */
+#define DEVICE_NAME                      "ZwiftCommander"                          /**< Name of device. Will be included in the advertising data. */
+#define MANUFACTURER_NAME                "Nordic"                                  /**< Manufacturer. Will be passed to Device Information Service. */
 
 #define APP_TIMER_PRESCALER              0                                          /**< Value of the RTC1 PRESCALER register. */
 #define APP_TIMER_OP_QUEUE_SIZE          4                                          /**< Size of timer operation queues. */
@@ -146,6 +147,12 @@
 
 #define MAX_KEYS_IN_ONE_REPORT           (INPUT_REPORT_KEYS_MAX_LEN - SCAN_CODE_POS) /**< Maximum number of key presses that can be sent in one Input Report. */
 
+
+#define ADC_REF_VOLTAGE_IN_MILLIVOLTS           1200
+#define ADC_PRE_SCALING_COMPENSATION            3 
+#define DIODE_FWD_VOLT_DROP_MILLIVOLTS          270
+#define ADC_RESULT_IN_MILLI_VOLTS(ADC_VALUE)    ((((ADC_VALUE) * ADC_REF_VOLTAGE_IN_MILLIVOLTS) / 1023) * ADC_PRE_SCALING_COMPENSATION)																	 
+#define ADC_BUFFER_SIZE 6 
 
 /**Buffer queue access macros
  *
@@ -259,6 +266,10 @@ static uint8_t m_caps_off_key_scan_str[] = /**< Key pattern to be sent when the 
 
 /** List to enqueue not just data to be sent, but also related information like the handle, connection handle etc */
 static buffer_list_t buffer_list;
+
+// ADC stuff
+static nrf_adc_value_t          adc_buffer[ADC_BUFFER_SIZE]; /**< ADC buffer. */
+static uint8_t                  adc_event_counter = 0;  
 
 static void on_hids_evt(ble_hids_t * p_hids, ble_hids_evt_t * p_evt);
 
@@ -475,40 +486,114 @@ static void ble_advertising_error_handler(uint32_t nrf_error)
 }
 
 
-/**@brief Function for performing a battery measurement, and update the Battery Level characteristic in the Battery Service.
+/**
+ * @brief ADC interrupt handler.
  */
-static void battery_level_update(void)
+static void adc_event_handler(nrf_drv_adc_evt_t const * p_event)
 {
     uint32_t err_code;
-    uint8_t  battery_level;
+    uint16_t adc_sum_value = 0;
+    uint16_t adc_average_value;
+    uint16_t adc_result_millivolts;
+    uint8_t  adc_result_percent;
 
-    battery_level = (uint8_t)sensorsim_measure(&m_battery_sim_state, &m_battery_sim_cfg);
-
-    err_code = ble_bas_battery_level_update(&m_bas, battery_level);
-    if ((err_code != NRF_SUCCESS) &&
-        (err_code != NRF_ERROR_INVALID_STATE) &&
-        (err_code != BLE_ERROR_NO_TX_PACKETS) &&
-        (err_code != BLE_ERROR_GATTS_SYS_ATTR_MISSING)
-       )
+    sd_clock_hfclk_release();			//Release the external crystal
+	
+    adc_event_counter++;
+    NRF_LOG_INFO("    ADC event counter: %d\r\n", adc_event_counter);
+    if (p_event->type == NRF_DRV_ADC_EVT_DONE)
     {
-        APP_ERROR_HANDLER(err_code);
+        uint32_t i;
+        for (i = 0; i < p_event->data.done.size; i++)
+        {
+            NRF_LOG_DEBUG("Sample value %d: %d\r\n", i+1, p_event->data.done.p_buffer[i]);
+            adc_sum_value += p_event->data.done.p_buffer[i];                           //Sum all values in ADC buffer
+        }
+        adc_average_value = adc_sum_value / p_event->data.done.size;                   //Calculate average value from all samples in the ADC buffer
+        NRF_LOG_INFO("Average ADC value: %d\r\n", adc_average_value);
+				
+        adc_result_millivolts = ADC_RESULT_IN_MILLI_VOLTS(adc_average_value);          //Transform the average ADC value into millivolts value
+        NRF_LOG_INFO("ADC result in millivolts: %d\r\n", adc_result_millivolts);
+				
+        adc_result_percent = battery_level_in_percent(adc_result_millivolts);          //Transform the millivolts value into battery level percent.
+        NRF_LOG_INFO("ADC result in percent: %d\r\n", adc_result_percent);
+				
+        //Send the battery level over BLE
+        err_code = ble_bas_battery_level_update(&m_bas, adc_result_percent);           //Send the battery level over BLE
+        if ((err_code != NRF_SUCCESS) &&
+            (err_code != NRF_ERROR_INVALID_STATE) &&                                   
+            (err_code != BLE_ERROR_NO_TX_PACKETS) &&                                   
+            (err_code != BLE_ERROR_GATTS_SYS_ATTR_MISSING))
+        {
+            APP_ERROR_HANDLER(err_code);                                               //Assert on error
+        }
     }
 }
 
+/**
+ * @brief Configure and initialize the ADC
+ */
+static void adc_config(void)
+{
+    ret_code_t ret_code;
+    nrf_drv_adc_config_t adc_config = NRF_DRV_ADC_DEFAULT_CONFIG;                                              //Get default ADC configuration
+    static nrf_drv_adc_channel_t adc_channel_config = NRF_DRV_ADC_DEFAULT_CHANNEL(NRF_ADC_CONFIG_INPUT_2);     //Get default ADC channel configuration
+	
+    //Uncomment the following two lines to sample the supply voltage of the nRF51 directly (not from a pin)
+    adc_channel_config.config.config.input = NRF_ADC_CONFIG_SCALING_SUPPLY_ONE_THIRD;
+    adc_channel_config.config.config.ain = NRF_ADC_CONFIG_INPUT_DISABLED;
+	
+    ret_code = nrf_drv_adc_init(&adc_config, adc_event_handler);              //Initialize the ADC
+    APP_ERROR_CHECK(ret_code);
+
+    nrf_drv_adc_channel_enable(&adc_channel_config);                          //Configure and enable an ADC channel
+}
+/**
+ * @brief Function to trigger ADC sampling
+ */
+void adc_sample(void)
+{
+    ret_code_t ret_code;
+    uint32_t p_is_running = 0;
+	
+    ret_code = nrf_drv_adc_buffer_convert(adc_buffer, ADC_BUFFER_SIZE);       // Allocate buffer for ADC
+    APP_ERROR_CHECK(ret_code);
+	
+    //Request the external high frequency crystal for best ADC accuracy. For lowest current consumption, don't request the crystal.
+    sd_clock_hfclk_request();
+    while(! p_is_running) {          //wait for the hfclk to be available
+        sd_clock_hfclk_is_running((&p_is_running));
+    }  
+	
+    for (uint32_t i = 0; i < ADC_BUFFER_SIZE; i++)
+    {
+        while((NRF_ADC->BUSY & ADC_BUSY_BUSY_Msk) == ADC_BUSY_BUSY_Busy) {}   //Wait until the ADC is finished sampling
+        NRF_LOG_DEBUG("Start sampling ... \r\n");
+        nrf_drv_adc_sample();        // Trigger ADC conversion
+    }					
+}
+
+/**@brief Function for performing battery measurement and updating the Battery Level characteristic
+ *        in Battery Service.
+ */
+static void battery_level_update(void)
+{	
+    NRF_LOG_INFO("\r\n    Triggering battery level update...\r\n");          //Indicate on UART that Button 4 is pressed
+	app_sched_event_put(0, 0, (app_sched_event_handler_t)adc_sample);    //Put adc_sample function into the scheduler queue, which will then be executed in the main context (lowest priority) when app_sched_execute is called in the main loop
+}
 
 /**@brief Function for handling the Battery measurement timer timeout.
  *
  * @details This function will be called each time the battery level measurement timer expires.
  *
- * @param[in]   p_context   Pointer used for passing some arbitrary information (context) from the
- *                          app_start_timer() call to the timeout handler.
+ * @param[in] p_context  Pointer used for passing some arbitrary information (context) from the
+ *                       app_start_timer() call to the timeout handler.
  */
 static void battery_level_meas_timeout_handler(void * p_context)
 {
     UNUSED_PARAMETER(p_context);
     battery_level_update();
 }
-
 
 /**@brief Function for the Timer initialization.
  *
@@ -745,7 +830,6 @@ static void services_init(void)
     bas_init();
     hids_init();
 }
-
 
 /**@brief Function for initializing the battery sensor simulator.
  */
@@ -1672,6 +1756,8 @@ int main(void)
     sensor_simulator_init();
     conn_params_init();
     buffer_init();
+
+    adc_config();
 
     // Start execution.
     NRF_LOG_INFO("HID Keyboard Start!\r\n");
