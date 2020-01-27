@@ -50,6 +50,7 @@
 #include "app_timer_appsh.h"
 #include "peer_manager.h"
 #include "nrf_drv_adc.h"
+#include "nrf_drv_wdt.h"
 #include "app_button.h"
 #include "fds.h"
 #include "fstorage.h"
@@ -94,8 +95,8 @@
 
 #define APP_ADV_FAST_INTERVAL            0x0028                                     /**< Fast advertising interval (in units of 0.625 ms. This value corresponds to 25 ms.). */
 #define APP_ADV_SLOW_INTERVAL            0x0C80                                     /**< Slow advertising interval (in units of 0.625 ms. This value corrsponds to 2 seconds). */
-#define APP_ADV_FAST_TIMEOUT             30                                         /**< The duration of the fast advertising period (in seconds). */
-#define APP_ADV_SLOW_TIMEOUT             180                                        /**< The duration of the slow advertising period (in seconds). */
+#define APP_ADV_FAST_TIMEOUT             60                                         /**< The duration of the fast advertising period (in seconds). */
+#define APP_ADV_SLOW_TIMEOUT             0                                          /**< The duration of the slow advertising period (in seconds). */
 
 /*lint -emacro(524, MIN_CONN_INTERVAL) // Loss of precision */
 #define MIN_CONN_INTERVAL                MSEC_TO_UNITS(7.5, UNIT_1_25_MS)            /**< Minimum connection interval (7.5 ms) */
@@ -150,7 +151,7 @@
 
 #define ADC_REF_VOLTAGE_IN_MILLIVOLTS           1200
 #define ADC_PRE_SCALING_COMPENSATION            3 
-#define DIODE_FWD_VOLT_DROP_MILLIVOLTS          270
+#define DIODE_FWD_VOLT_DROP_MILLIVOLTS          0
 #define ADC_RESULT_IN_MILLI_VOLTS(ADC_VALUE)    ((((ADC_VALUE) * ADC_REF_VOLTAGE_IN_MILLIVOLTS) / 1023) * ADC_PRE_SCALING_COMPENSATION)																	 
 #define ADC_BUFFER_SIZE 6 
 
@@ -231,6 +232,8 @@ static pm_peer_id_t   m_whitelist_peers[BLE_GAP_WHITELIST_ADDR_MAX_COUNT];  /**<
 static uint32_t       m_whitelist_peer_cnt;                                 /**< Number of peers currently in the whitelist. */
 static bool           m_is_wl_changed;                                      /**< Indicates if the whitelist has been changed since last time it has been updated in the Peer Manager. */
 
+nrf_drv_wdt_channel_id m_channel_id;
+
 static ble_uuid_t m_adv_uuids[] = {{BLE_UUID_HUMAN_INTERFACE_DEVICE_SERVICE, BLE_UUID_TYPE_BLE}};
 
 static uint8_t m_sample_key_press_scan_str[] = /**< Key pattern to be sent when the key press button has been pushed. */
@@ -272,6 +275,9 @@ static nrf_adc_value_t          adc_buffer[ADC_BUFFER_SIZE]; /**< ADC buffer. */
 static uint8_t                  adc_event_counter = 0;  
 
 static void on_hids_evt(ble_hids_t * p_hids, ble_hids_evt_t * p_evt);
+
+void dfu_init(void);
+void ble_evt_dfu(ble_evt_t * p_ble_evt);
 
 /**@brief Callback function for asserts in the SoftDevice.
  *
@@ -829,6 +835,7 @@ static void services_init(void)
     dis_init();
     bas_init();
     hids_init();
+    dfu_init();
 }
 
 /**@brief Function for initializing the battery sensor simulator.
@@ -1489,6 +1496,9 @@ static void ble_evt_dispatch(ble_evt_t * p_ble_evt)
     ble_conn_params_on_ble_evt(p_ble_evt);
     ble_hids_on_ble_evt(&m_hids, p_ble_evt);
     ble_bas_on_ble_evt(&m_bas, p_ble_evt);
+
+	// BLE services
+	ble_evt_dfu(p_ble_evt);
 }
 
 
@@ -1598,6 +1608,7 @@ static void bsp_event_handler(bsp_event_t event)
         case BSP_EVENT_KEY_0:
             if (m_conn_handle != BLE_CONN_HANDLE_INVALID)
             {
+                // TODO keys
                 keys_send(1, p_key);
                 p_key++;
                 size++;
@@ -1719,6 +1730,14 @@ static void buttons_leds_init(bool * p_erase_bonds)
     *p_erase_bonds = (startup_event == BSP_EVENT_CLEAR_BONDING_DATA);
 }
 
+/**
+ * @brief WDT events handler.
+ */
+void wdt_event_handler(void)
+{
+    // empty function
+}
+
 
 /**@brief Function for the Power manager.
  */
@@ -1737,9 +1756,23 @@ int main(void)
     bool     erase_bonds;
     uint32_t err_code;
 
+	//Configure WDT.
+    nrf_drv_wdt_config_t config = NRF_DRV_WDT_DEAFULT_CONFIG;
+    err_code = nrf_drv_wdt_init(&config, wdt_event_handler);
+    APP_ERROR_CHECK(err_code);
+    err_code = nrf_drv_wdt_channel_alloc(&m_channel_id);
+    APP_ERROR_CHECK(err_code);
+    nrf_drv_wdt_enable();
+
     // Initialize.
     err_code = NRF_LOG_INIT(NULL);
     APP_ERROR_CHECK(err_code);
+
+	nrf_gpio_cfg_output(31);
+	nrf_gpio_pin_clear(31);
+
+	nrf_gpio_cfg_output(19);
+	nrf_gpio_pin_clear(19);
 
     timers_init();
     buttons_leds_init(&erase_bonds);
@@ -1771,6 +1804,8 @@ int main(void)
         if (NRF_LOG_PROCESS() == false)
         {
             power_manage();
+
+    		nrf_drv_wdt_channel_feed(m_channel_id);
         }
     }
 }
