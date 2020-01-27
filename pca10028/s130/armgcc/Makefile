@@ -36,6 +36,7 @@ SRC_FILES += \
   $(SDK_ROOT)/components/drivers_nrf/gpiote/nrf_drv_gpiote.c \
   $(SDK_ROOT)/components/drivers_nrf/adc/nrf_drv_adc.c \
   $(SDK_ROOT)/components/drivers_nrf/uart/nrf_drv_uart.c \
+  $(SDK_ROOT)/components/drivers_nrf/power/nrf_drv_power.c \
   $(SDK_ROOT)/components/libraries/bsp/bsp.c \
   $(SDK_ROOT)/components/libraries/bsp/bsp_btn_ble.c \
   $(SDK_ROOT)/components/libraries/bsp/bsp_nfc.c \
@@ -183,7 +184,7 @@ INC_FOLDERS += \
 LIB_FILES += \
 
 # C flags common to all targets
-CFLAGS += -DBOARD_PCA10028
+CFLAGS += -DBOARD_CUSTOM
 CFLAGS += -DSOFTDEVICE_PRESENT
 CFLAGS += -DNRF51
 CFLAGS += -DS130
@@ -205,7 +206,7 @@ CXXFLAGS += \
 
 # Assembler flags common to all targets
 ASMFLAGS += -x assembler-with-cpp
-ASMFLAGS += -DBOARD_PCA10028
+ASMFLAGS += -DBOARD_CUSTOM
 ASMFLAGS += -DSOFTDEVICE_PRESENT
 ASMFLAGS += -DNRF51
 ASMFLAGS += -DS130

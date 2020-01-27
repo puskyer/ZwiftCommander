@@ -44,11 +44,7 @@
 #include "nrf_log.h"
 #include "nrf_log_ctrl.h"
 
-static uint16_t m_conn_handle = BLE_CONN_HANDLE_INVALID;                            /**< Handle of the current connection. */
-
 static ble_dfu_t m_dfus;                                                            /**< Structure used to identify the DFU service. */
-
-
 
 
 static void ble_dfu_evt_handler(ble_dfu_t * p_dfu, ble_dfu_evt_t * p_evt)

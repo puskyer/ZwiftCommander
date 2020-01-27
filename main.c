@@ -51,10 +51,12 @@
 #include "peer_manager.h"
 #include "nrf_drv_adc.h"
 #include "nrf_drv_wdt.h"
+#include "nrf_drv_power.h"
 #include "app_button.h"
 #include "fds.h"
 #include "fstorage.h"
 #include "ble_conn_state.h"
+#include "usb_hid_keys.h"
 
 #define NRF_LOG_MODULE_NAME "APP"
 #include "nrf_log.h"
@@ -220,9 +222,6 @@ static ble_bas_t  m_bas;                                    /**< Structure used 
 static bool       m_in_boot_mode = false;                   /**< Current protocol mode. */
 static uint16_t   m_conn_handle  = BLE_CONN_HANDLE_INVALID; /**< Handle of the current connection. */
 
-static sensorsim_cfg_t   m_battery_sim_cfg;                 /**< Battery Level sensor simulator configuration. */
-static sensorsim_state_t m_battery_sim_state;               /**< Battery Level sensor simulator state. */
-
 APP_TIMER_DEF(m_battery_timer_id);                          /**< Battery timer. */
 
 static pm_peer_id_t m_peer_id;                              /**< Device reference handle to the current bonded central. */
@@ -234,37 +233,18 @@ static bool           m_is_wl_changed;                                      /**<
 
 nrf_drv_wdt_channel_id m_channel_id;
 
-static ble_uuid_t m_adv_uuids[] = {{BLE_UUID_HUMAN_INTERFACE_DEVICE_SERVICE, BLE_UUID_TYPE_BLE}};
+static ble_uuid_t m_adv_uuids[] = {{BLE_UUID_HUMAN_INTERFACE_DEVICE_SERVICE, BLE_UUID_TYPE_BLE},
+		{BLE_UUID_DEVICE_INFORMATION_SERVICE, BLE_UUID_TYPE_BLE}};
 
-static uint8_t m_sample_key_press_scan_str[] = /**< Key pattern to be sent when the key press button has been pushed. */
-{
-    0x0b,                                      /* Key h */
-    0x08,                                      /* Key e */
-    0x0f,                                      /* Key l */
-    0x0f,                                      /* Key l */
-    0x12,                                      /* Key o */
-    0x28                                       /* Key Return */
-};
-
-static uint8_t m_caps_on_key_scan_str[] = /**< Key pattern to be sent when the output report has been written with the CAPS LOCK bit set. */
-{
-    0x06,                                 /* Key C */
-    0x04,                                 /* Key a */
-    0x13,                                 /* Key p */
-    0x16,                                 /* Key s */
-    0x12,                                 /* Key o */
-    0x11,                                 /* Key n */
-};
-
-static uint8_t m_caps_off_key_scan_str[] = /**< Key pattern to be sent when the output report has been written with the CAPS LOCK bit cleared. */
-{
-    0x06,                                  /* Key C */
-    0x04,                                  /* Key a */
-    0x13,                                  /* Key p */
-    0x16,                                  /* Key s */
-    0x12,                                  /* Key o */
-    0x09,                                  /* Key f */
-};
+//static uint8_t m_sample_key_press_scan_str[] = /**< Key pattern to be sent when the key press button has been pushed. */
+//{
+//    0x0b,                                      /* Key h */
+//    0x08,                                      /* Key e */
+//    0x0f,                                      /* Key l */
+//    0x0f,                                      /* Key l */
+//    0x12,                                      /* Key o */
+//    0x28                                       /* Key Return */
+//};
 
 
 /** List to enqueue not just data to be sent, but also related information like the handle, connection handle etc */
@@ -278,6 +258,7 @@ static void on_hids_evt(ble_hids_t * p_hids, ble_hids_evt_t * p_evt);
 
 void dfu_init(void);
 void ble_evt_dfu(ble_evt_t * p_ble_evt);
+static void sleep_mode_enter(void);
 
 /**@brief Callback function for asserts in the SoftDevice.
  *
@@ -295,6 +276,33 @@ void assert_nrf_callback(uint16_t line_num, const uint8_t * p_file_name)
     app_error_handler(DEAD_BEEF, line_num, p_file_name);
 }
 
+/**@brief Callback function for asserts in the SoftDevice.
+ *
+ * @details This function will be called in case of an assert in the SoftDevice.
+ *
+ * @warning This handler is an example only and does not fit a final product. You need to analyze
+ *          how your product is supposed to react in case of Assert.
+ * @warning On assert from the SoftDevice, the system can only recover on reset.
+ *
+ * @param[in] line_num   Line number of the failing ASSERT call.
+ * @param[in] file_name  File name of the failing ASSERT call.
+ */
+
+void app_error_handler(uint32_t error_code, uint32_t line_num, const uint8_t *p_file_name) {
+
+    if (error_code == NRF_SUCCESS) return;
+
+	NRF_LOG_ERROR("Erreur: 0x%x ligne %u file %s !!\n", (unsigned int)error_code, (unsigned int)line_num, (uint32_t) p_file_name);
+
+}
+
+void app_error_handler_bare(uint32_t error_code) {
+
+  if (error_code == NRF_SUCCESS) return;
+
+  NRF_LOG_ERROR("Erreur bare: 0x%x\n", error_code);
+
+}
 
 /**@brief Fetch the list of peer manager peer IDs.
  *
@@ -506,7 +514,7 @@ static void adc_event_handler(nrf_drv_adc_evt_t const * p_event)
     sd_clock_hfclk_release();			//Release the external crystal
 	
     adc_event_counter++;
-    NRF_LOG_INFO("    ADC event counter: %d\r\n", adc_event_counter);
+    NRF_LOG_DEBUG("    ADC event counter: %d\r\n", adc_event_counter);
     if (p_event->type == NRF_DRV_ADC_EVT_DONE)
     {
         uint32_t i;
@@ -516,13 +524,13 @@ static void adc_event_handler(nrf_drv_adc_evt_t const * p_event)
             adc_sum_value += p_event->data.done.p_buffer[i];                           //Sum all values in ADC buffer
         }
         adc_average_value = adc_sum_value / p_event->data.done.size;                   //Calculate average value from all samples in the ADC buffer
-        NRF_LOG_INFO("Average ADC value: %d\r\n", adc_average_value);
+        NRF_LOG_DEBUG("Average ADC value: %d\r\n", adc_average_value);
 				
         adc_result_millivolts = ADC_RESULT_IN_MILLI_VOLTS(adc_average_value);          //Transform the average ADC value into millivolts value
         NRF_LOG_INFO("ADC result in millivolts: %d\r\n", adc_result_millivolts);
 				
         adc_result_percent = battery_level_in_percent(adc_result_millivolts);          //Transform the millivolts value into battery level percent.
-        NRF_LOG_INFO("ADC result in percent: %d\r\n", adc_result_percent);
+        NRF_LOG_DEBUG("ADC result in percent: %d\r\n", adc_result_percent);
 				
         //Send the battery level over BLE
         err_code = ble_bas_battery_level_update(&m_bas, adc_result_percent);           //Send the battery level over BLE
@@ -584,7 +592,7 @@ void adc_sample(void)
  */
 static void battery_level_update(void)
 {	
-    NRF_LOG_INFO("\r\n    Triggering battery level update...\r\n");          //Indicate on UART that Button 4 is pressed
+    NRF_LOG_DEBUG("\r\n    Triggering battery level update...\r\n");          //Indicate on UART that Button 4 is pressed
 	app_sched_event_put(0, 0, (app_sched_event_handler_t)adc_sample);    //Put adc_sample function into the scheduler queue, which will then be executed in the main context (lowest priority) when app_sched_execute is called in the main loop
 }
 
@@ -836,18 +844,6 @@ static void services_init(void)
     bas_init();
     hids_init();
     dfu_init();
-}
-
-/**@brief Function for initializing the battery sensor simulator.
- */
-static void sensor_simulator_init(void)
-{
-    m_battery_sim_cfg.min          = MIN_BATTERY_LEVEL;
-    m_battery_sim_cfg.max          = MAX_BATTERY_LEVEL;
-    m_battery_sim_cfg.incr         = BATTERY_LEVEL_INCREMENT;
-    m_battery_sim_cfg.start_at_max = true;
-
-    sensorsim_init(&m_battery_sim_state, &m_battery_sim_cfg);
 }
 
 
@@ -1193,7 +1189,8 @@ static void on_hid_rep_char_write(ble_hids_evt_t * p_evt)
                 err_code = bsp_indication_set(BSP_INDICATE_ALERT_3);
                 APP_ERROR_CHECK(err_code);
 
-                keys_send(sizeof(m_caps_on_key_scan_str), m_caps_on_key_scan_str);
+                //keys_send(sizeof(m_caps_on_key_scan_str), m_caps_on_key_scan_str);
+                sleep_mode_enter();
                 m_caps_on = true;
             }
             else if (m_caps_on && ((report_val & OUTPUT_REPORT_BIT_MASK_CAPS_LOCK) == 0))
@@ -1203,7 +1200,7 @@ static void on_hid_rep_char_write(ble_hids_evt_t * p_evt)
                 err_code = bsp_indication_set(BSP_INDICATE_ALERT_OFF);
                 APP_ERROR_CHECK(err_code);
 
-                keys_send(sizeof(m_caps_off_key_scan_str), m_caps_off_key_scan_str);
+                //keys_send(sizeof(m_caps_off_key_scan_str), m_caps_off_key_scan_str);
                 m_caps_on = false;
             }
             else
@@ -1282,36 +1279,36 @@ static void on_adv_evt(ble_adv_evt_t ble_adv_evt)
     {
         case BLE_ADV_EVT_DIRECTED:
             NRF_LOG_INFO("BLE_ADV_EVT_DIRECTED\r\n");
-            err_code = bsp_indication_set(BSP_INDICATE_ADVERTISING_DIRECTED);
-            APP_ERROR_CHECK(err_code);
+//            err_code = bsp_indication_set(BSP_INDICATE_ADVERTISING_DIRECTED);
+//            APP_ERROR_CHECK(err_code);
             break; //BLE_ADV_EVT_DIRECTED
 
         case BLE_ADV_EVT_FAST:
             NRF_LOG_INFO("BLE_ADV_EVT_FAST\r\n");
-            err_code = bsp_indication_set(BSP_INDICATE_ADVERTISING);
-            APP_ERROR_CHECK(err_code);
+//            err_code = bsp_indication_set(BSP_INDICATE_ADVERTISING);
+//            APP_ERROR_CHECK(err_code);
             break; //BLE_ADV_EVT_FAST
 
         case BLE_ADV_EVT_SLOW:
             NRF_LOG_INFO("BLE_ADV_EVT_SLOW\r\n");
-            err_code = bsp_indication_set(BSP_INDICATE_ADVERTISING_SLOW);
-            APP_ERROR_CHECK(err_code);
+//            err_code = bsp_indication_set(BSP_INDICATE_ADVERTISING_SLOW);
+//            APP_ERROR_CHECK(err_code);
             break; //BLE_ADV_EVT_SLOW
 
         case BLE_ADV_EVT_FAST_WHITELIST:
             NRF_LOG_INFO("BLE_ADV_EVT_FAST_WHITELIST\r\n");
-            err_code = bsp_indication_set(BSP_INDICATE_ADVERTISING_WHITELIST);
-            APP_ERROR_CHECK(err_code);
+//            err_code = bsp_indication_set(BSP_INDICATE_ADVERTISING_WHITELIST);
+//            APP_ERROR_CHECK(err_code);
             break; //BLE_ADV_EVT_FAST_WHITELIST
 
         case BLE_ADV_EVT_SLOW_WHITELIST:
             NRF_LOG_INFO("BLE_ADV_EVT_SLOW_WHITELIST\r\n");
-            err_code = bsp_indication_set(BSP_INDICATE_ADVERTISING_WHITELIST);
-            APP_ERROR_CHECK(err_code);
+//            err_code = bsp_indication_set(BSP_INDICATE_ADVERTISING_WHITELIST);
+//            APP_ERROR_CHECK(err_code);
             break; //BLE_ADV_EVT_SLOW_WHITELIST
 
         case BLE_ADV_EVT_IDLE:
-            sleep_mode_enter();
+            //sleep_mode_enter();
             break; //BLE_ADV_EVT_IDLE
 
         case BLE_ADV_EVT_WHITELIST_REQUEST:
@@ -1576,8 +1573,6 @@ static void scheduler_init(void)
 static void bsp_event_handler(bsp_event_t event)
 {
     uint32_t         err_code;
-    static uint8_t * p_key = m_sample_key_press_scan_str;
-    static uint8_t   size  = 0;
 
     switch (event)
     {
@@ -1609,14 +1604,32 @@ static void bsp_event_handler(bsp_event_t event)
             if (m_conn_handle != BLE_CONN_HANDLE_INVALID)
             {
                 // TODO keys
-                keys_send(1, p_key);
-                p_key++;
-                size++;
-                if (size == MAX_KEYS_IN_ONE_REPORT)
-                {
-                    p_key = m_sample_key_press_scan_str;
-                    size  = 0;
-                }
+            	uint8_t key_pattern = KEY_SPACE;
+                keys_send(1, &key_pattern);
+            }
+            break;
+
+        case BSP_EVENT_KEY_1:
+            if (m_conn_handle != BLE_CONN_HANDLE_INVALID)
+            {
+            	uint8_t key_pattern = KEY_G;
+                keys_send(1, &key_pattern);
+            }
+            break;
+
+        case BSP_EVENT_KEY_2:
+            if (m_conn_handle != BLE_CONN_HANDLE_INVALID)
+            {
+            	uint8_t key_pattern = KEY_LEFT;
+                keys_send(1, &key_pattern);
+            }
+            break;
+
+        case BSP_EVENT_KEY_3:
+            if (m_conn_handle != BLE_CONN_HANDLE_INVALID)
+            {
+            	uint8_t key_pattern = KEY_RIGHT;
+                keys_send(1, &key_pattern);
             }
             break;
 
@@ -1764,6 +1777,12 @@ int main(void)
     APP_ERROR_CHECK(err_code);
     nrf_drv_wdt_enable();
 
+    const nrf_drv_power_config_t power_config = {
+    		.dcdcen = 1,
+    };
+    err_code = nrf_drv_power_init(&power_config);
+    APP_ERROR_CHECK(err_code);
+
     // Initialize.
     err_code = NRF_LOG_INIT(NULL);
     APP_ERROR_CHECK(err_code);
@@ -1778,6 +1797,7 @@ int main(void)
     buttons_leds_init(&erase_bonds);
     ble_stack_init();
     scheduler_init();
+    //erase_bonds = true;
     peer_manager_init(erase_bonds);
     if (erase_bonds == true)
     {
@@ -1786,7 +1806,7 @@ int main(void)
     gap_params_init();
     advertising_init();
     services_init();
-    sensor_simulator_init();
+
     conn_params_init();
     buffer_init();
 
